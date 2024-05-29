@@ -20,6 +20,8 @@ from DATT.learning.base_env import BaseQuadsimEnv
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv
 
+from custom_policies import RMAPolicy, RPGPolicy
+
 from torch.utils.tensorboard import SummaryWriter
 
 def parse_args():
@@ -81,26 +83,50 @@ def remove_e_dim(output_obs: np.ndarray, e_dims: int, base_dims=10, include_extr
         obs = output_obs[:, :base_dims]
     return obs
 
+def remove_gt_info(output_obs: np.ndarray, encoder_input_dim: int = 10):
+    obs = output_obs[:, :-encoder_input_dim]
+    encoder_input_info = output_obs[:, -encoder_input_dim:]
+    return obs, encoder_input_info
+
+def add_latent(obs: np.ndarray, latent: np.ndarray):
+    return np.concatenate((obs, latent), axis=1)
+
+
 def rollout_adaptive_policy(rollout_len, adaptation_network, policy, evalenv, n_envs, time_horizon, base_dims, e_dims, device, progress=None):
     action_dims = 4
 
     history = torch.zeros((n_envs, base_dims + action_dims, time_horizon)).to(device)
     all_e_pred = None
     all_e_gt = None
-    fbff_obs = remove_e_dim(evalenv.reset(), e_dims, include_extra=True)
+    if isinstance(policy.policy, RMAPolicy) or isinstance(policy.policy, RPGPolicy):
+        fbff_obs, encoder_input = remove_gt_info(evalenv.reset())
+    else:
+        fbff_obs = remove_e_dim(evalenv.reset(), e_dims, include_extra=True)
     for i in range(rollout_len):
         # shape (n_envs, e_dim)
         e_pred = adaptation_network(history)
 
-        input_obs = add_e_dim(fbff_obs, e_pred.detach().cpu().numpy(), base_dims)
+        if isinstance(policy.policy, RMAPolicy) or isinstance(policy.policy, RPGPolicy):
+            input_obs = add_latent(fbff_obs, e_pred.detach().cpu().numpy())
+        else:
+            input_obs = add_e_dim(fbff_obs, e_pred.detach().cpu().numpy(), base_dims)
 
-        actions, _states = policy.predict(input_obs, deterministic=True)
+        if isinstance(policy.policy, RMAPolicy):
+            actions, _states = policy.policy.predict(input_obs, deterministic=True, features_included=True)
+        else:
+            actions, _states = policy.predict(input_obs, deterministic=True)
+        
 
         # this obs contains e, which should be removed
         obs, rewards, dones, info = evalenv.step(actions)
 
-        e_gt = obs[:, base_dims:(base_dims + e_dims)]
-        e_gt = torch.from_numpy(e_gt).to(device).float()
+        if isinstance(policy.policy, RMAPolicy) or isinstance(policy.policy, RPGPolicy):
+            fbff_obs, encoder_input = remove_gt_info(obs)
+            e_gt = policy.policy.encoder(torch.from_numpy(encoder_input).to(device)).float()
+        else:
+            e_gt = obs[:, base_dims:(base_dims + e_dims)]
+            e_gt = torch.from_numpy(e_gt).to(device).float()
+            fbff_obs = remove_e_dim(obs, e_dims, include_extra=True)
 
         if all_e_pred is None:
             all_e_pred = e_pred
@@ -119,7 +145,7 @@ def rollout_adaptive_policy(rollout_len, adaptation_network, policy, evalenv, n_
         # shift history forward in time
         history = torch.cat((torch.unsqueeze(adaptation_input, -1), history[:, :, :-1].clone()), dim=2)
         
-        fbff_obs = remove_e_dim(obs, e_dims, include_extra=True)
+       
 
         if progress is not None:
             progress[0].update(task_id=progress[1], completed=i + 1)
@@ -171,23 +197,28 @@ def RMA():
 
     trainenv = task_train.env()(config=config)
     vec_env_class = SubprocVecEnv if subprocess else DummyVecEnv
+    # evalenv = make_vec_env(task.env(), n_envs=n_envs, vec_env_cls=vec_env_class,
+    #     env_kwargs={
+    #         'config': config,
+    #         'log_scale': log_scale,
+    #         'ref': ref,
+    #         'y_max': ymax,
+    #         'z_max': zmax,
+    #         'diff_axis': diff_axis,
+    #         'relative': relative,
+    #         'body_frame': body_frame,
+    #         'second_order_delay': second_order
+    #     }
+    # )    
     evalenv = make_vec_env(task.env(), n_envs=n_envs, vec_env_cls=vec_env_class,
         env_kwargs={
-            'config': config,
-            'log_scale': log_scale,
-            'ref': ref,
-            'y_max': ymax,
-            'z_max': zmax,
-            'diff_axis': diff_axis,
-            'relative': relative,
-            'body_frame': body_frame,
-            'second_order_delay': second_order
-        }
-    )    
+            'config': config
+        })  
 
     device = torch.device(f"cuda:{de}" if torch.cuda.is_available() else "cpu")
 
     policy = algo_class.load(SAVED_POLICY_DIR / f'{policy_name}.zip')
+
 
     action_dims = 4
     if adapt_name is not None and os.path.exists(SAVED_POLICY_DIR / f'{policy_name}_adapt' / f'{adapt_name}'):
@@ -201,7 +232,10 @@ def RMA():
     if not os.path.isdir(SAVED_POLICY_DIR / f'{policy_name}_adapt'):
         os.mkdir(SAVED_POLICY_DIR / f'{policy_name}_adapt')
 
-    adaptation_network = AdaptationNetwork(input_dims=trainenv.base_dims + action_dims, e_dims=e_dims)
+    if isinstance(policy.policy, RMAPolicy):
+        adaptation_network = AdaptationNetwork(input_dims=trainenv.base_dims + action_dims, e_dims=5)
+    else:
+        adaptation_network = AdaptationNetwork(input_dims=trainenv.base_dims + action_dims, e_dims=e_dims)
     adaptation_network = adaptation_network.to(device)
     if not adaptation_network_state_dict is None:
         adaptation_network.load_state_dict(adaptation_network_state_dict)

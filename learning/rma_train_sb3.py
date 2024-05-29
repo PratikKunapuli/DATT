@@ -6,6 +6,7 @@ from enum import Enum
 from pathlib import Path
 
 import torch
+import torch.nn as nn
 import numpy as np
 from stable_baselines3.common.base_class import BaseAlgorithm
 from stable_baselines3.common.callbacks import CheckpointCallback
@@ -22,6 +23,16 @@ from DATT.learning.utils.feedforward_feature_extractor import \
 from DATT.learning.configs import *
 from DATT.learning.tasks import DroneTask
 from DATT.refs import TrajectoryRef
+
+from stable_baselines3.common.policies import ActorCriticPolicy
+from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
+from stable_baselines3.common.distributions import make_proba_distribution
+from stable_baselines3.common.utils import get_device
+from gym.spaces import Box
+
+from custom_policies import RMAFeaturesExtractor, RMAEncoder, RMAPolicy
+from custom_policies import RPGFeaturesExtractor, RPGPolicy
+
 
 def parse_args():
     parser = ArgumentParser()
@@ -66,6 +77,8 @@ def parse_args():
         type=int, default=0,
         help='GPU ID to use.'
     )
+
+    parser.add_argument("--model", type=str, required=True, help="Model to use (RMA or RPG)")
     
     parser.add_argument('--n-envs', type=int, help='How many "parallel" environments to run', default=10)
     parser.add_argument('-r', '--ref', dest='ref', type=TrajectoryRef, default=TrajectoryRef.LINE_REF)
@@ -169,64 +182,63 @@ def train():
     else:
       env = make_vec_env(env_class, n_envs=n_envs, env_kwargs=env_kwargs)
 
-    print(env.reset())
+    print(env.reset().shape)
 
     algo_class = algo.algo_class()
 
 
     if not (SAVED_POLICY_DIR / f'{policy_name}.zip').exists():
-        features_extractor_kwargs = {}        
-        if task.is_trajectory():
-            if config.policy_config.conv_extractor:
-                features_extractor_class = FeedforwardFeaturesExtractor
-            else:
-                features_extractor_class = FlattenExtractor
+        print('Training new policy!')
+        if args.model == "RMA" or args.model == "rma":
+            encoder_net_arch = [64, 64]
+            encoder_output_dim = 5
+            encoder_input_dim = 10
+            policy_net_arch = [dict(pi=[64, 64, 64], vf=[64, 64, 64])]
+            policy_kwargs = dict(activation_fn=torch.nn.ReLU,
+                        net_arch=policy_net_arch,
+                        encoder_input_dim = encoder_input_dim,
+                        encoder_output_dim = encoder_output_dim, 
+                        encoder_network_architecture= encoder_net_arch
+            )
 
-            features_extractor_kwargs['extra_state_features'] = 0
-            extra_dims = task.env()(config=config).extra_dims
-            features_extractor_kwargs['extra_state_features'] += extra_dims
-            if task == DroneTask.TRAJFBFF or task == DroneTask.TRAJFBFF_VEL or task == DroneTask.TRAJ_POLY:
-                features_extractor_kwargs['extra_state_features'] += 3
-            elif task == DroneTask.TRAJFBFF_YAW:
-                features_extractor_kwargs['extra_state_features'] += 4
+            kwargs = {}
+            if issubclass(algo_class, OffPolicyAlgorithm):
+                kwargs['train_freq'] = (5000, 'step')
 
-            if task == DroneTask.TRAJFBFF and not config.policy_config.fb_term:
-                features_extractor_kwargs['extra_state_features'] -= 3
+            policy_network_type = 'RMAPolicy'
+            print(f'Using policy network type: {policy_network_type}')
+            
+            policy: BaseAlgorithm = algo_class(
+                RMAPolicy, 
+                env, 
+                tensorboard_log=log_dir, 
+                policy_kwargs=policy_kwargs,
+                device=f'cuda:{device}',
+                verbose=0,
+                **kwargs
+            )
+        elif args.model == "RPG" or args.model == "rpg":
+            policy_net_arch = [dict(pi=[128, 128, 128], vf=[128, 128, 128])]
+            policy_kwargs = dict(activation_fn=torch.nn.ReLU,
+                        net_arch=policy_net_arch,
+            )
 
-            if task == DroneTask.TRAJFBFF_VEL:
-                features_extractor_kwargs['dims'] = 6
-            elif task == DroneTask.TRAJFBFF_YAW:
-                features_extractor_kwargs['dims'] = 4
-        else:
-            features_extractor_class = FlattenExtractor
+            kwargs = {}
+            if issubclass(algo_class, OffPolicyAlgorithm):
+                kwargs['train_freq'] = (5000, 'step')
 
-        print(f'Using feature extractor: {features_extractor_class}')
-        net_arch = [dict(pi=[64, 64, 64], vf=[64, 64, 64])]
-        if issubclass(algo_class, OffPolicyAlgorithm):
-            net_arch = [64, 64, 64]
+            policy_network_type = 'RPGPolicy'
+            print(f'Using policy network type: {policy_network_type}')
 
-        policy_kwargs = dict(activation_fn=torch.nn.ReLU,
-                     net_arch=net_arch,
-                     features_extractor_class=features_extractor_class,
-                     features_extractor_kwargs=features_extractor_kwargs
-        )
-
-        kwargs = {}
-        if issubclass(algo_class, OffPolicyAlgorithm):
-            kwargs['train_freq'] = (5000, 'step')
-
-        policy_network_type = 'MlpPolicy'
-        print(f'Using policy network type: {policy_network_type}')
-        
-        policy: BaseAlgorithm = algo_class(
-            policy_network_type, 
-            env, 
-            tensorboard_log=log_dir, 
-            policy_kwargs=policy_kwargs,
-            device=f'cuda:{device}',
-            verbose=0,
-            **kwargs
-        )
+            policy: BaseAlgorithm = algo_class(
+                RPGPolicy, 
+                env, 
+                tensorboard_log=log_dir, 
+                policy_kwargs=policy_kwargs,
+                device=f'cuda:{device}',
+                verbose=0,
+                **kwargs
+            )
     else:
         policy: BaseAlgorithm = algo_class.load(SAVED_POLICY_DIR / f'{policy_name}.zip', env)
         print('CONTINUING TRAINING!')
@@ -239,6 +251,9 @@ def train():
         )
     else:
         checkpoint_callback = None
+
+
+    print(env.reset().shape)
 
     policy.learn(total_timesteps=ts, progress_bar=True, callback=checkpoint_callback)
     policy.save(SAVED_POLICY_DIR / policy_name)
