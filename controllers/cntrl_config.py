@@ -38,9 +38,19 @@ class PIDConfig:
     kp_pos = 6.0
     kd_pos = 4.0
     ki_pos = 1.2 # 0 for sim
-    kp_rot =   150.0/16
+    kp_rot =   10
     yaw_gain = 220.0/16
     kp_ang =   16
+    
+class GCConfig:
+    kp_ctbr = 15.0
+    kd_ctbr = 10.0
+    kr_ctbr =   8
+    CTBR = True
+    kp_srt = 15.0
+    kd_srt = 10.0
+    kr_srt = 10
+    kw_srt = 10
 
 class DATTConfig:
     task = DroneTask.HOVER

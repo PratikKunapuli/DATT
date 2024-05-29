@@ -1,5 +1,5 @@
 from DATT.learning.tasks import DroneTask
-from DATT.controllers.cntrl_config import PIDConfig, MPPIConfig, DATTConfig
+from DATT.controllers.cntrl_config import PIDConfig, MPPIConfig, DATTConfig, GCConfig
 
 # DATT hover
 datt_hover_config = DATTConfig()
@@ -31,3 +31,5 @@ pid_config = PIDConfig()
 
 
 mppi_config = MPPIConfig()
+
+gc_config = GCConfig()
