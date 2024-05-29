@@ -3,7 +3,7 @@ import sys
 import numpy as np
 
 from DATT.quadsim.sim import QuadSim
-from DATT.quadsim.models import IdentityModel
+from DATT.quadsim.models import IdentityModel, RBModel
 
 from DATT.refs.pointed_star import NPointedStar
 from DATT.learning.configs import *
@@ -52,7 +52,11 @@ if __name__ == "__main__":
                        env_diff_seed=config.training_config.env_diff_seed)
 
     # Loading drone configs
-    model = IdentityModel()
+    # model = IdentityModel()
+    mass = config.drone_config.sampler.sample_param(config.drone_config.mass)
+    I = np.eye(3)*config.drone_config.sampler.sample_param(config.drone_config.I)
+    g = config.drone_config.sampler.sample_param(config.sim_config.g)
+    model = RBModel(mass, I, g)
 
     # Loading sim
     quadsim = QuadSim(model, vis=vis)
@@ -72,6 +76,9 @@ if __name__ == "__main__":
     ]
     ts = quadsim.simulate(dt=dt, t_end=t_end, controller=controller, dists=dists)
 
+    # print(ts)
+    # print(ts.keys())
+
     if not plot:
         sys.exit(0)
 
@@ -88,17 +95,19 @@ if __name__ == "__main__":
     plt.plot(ts.times, ts.pos[:, 2])
     plt.plot(ts.times, ref.pos(ts.times)[2, :])
     plt.suptitle(type(controller).__name__)
+    plt.savefig("main_pos.png")
 
     plt.figure()
 
     plt.plot(ts.pos[:, 0], ts.pos[:, 1], label='actual')
     # plt.plot(ref.pos(ts.times)[0, :], ref.pos(ts.times)[1, :], label='desired')
     plt.legend()
+    plt.savefig("main_traj.png")
 
     # subplot(ts.times, ts.pos, yname="Pos. (m)", title="Position", des=ref.pos(ts.times))
     subplot(ts.times, ts.vel, yname="Vel. (m)", title="Velocity")
 
-    subplot(ts.times, ref.vel(ts.times).T, yname="Vel. (m)", title="Velocity", label="Desired")
+    # subplot(ts.times, ref.vel(ts.times).T, yname="Vel. (m)", title="Velocity", label="Desired")
 
     subplot(ts.times, eulers, yname="Euler (rad)", title="ZYX Euler Angles")
     subplot(ts.times, ts.ang, yname="$\\omega$ (rad/s)", title="Angular Velocity")
@@ -112,5 +121,10 @@ if __name__ == "__main__":
     # ax.set_zlabel("Z (m)")
     # plt.title("Trajectory")
     # set_3daxes_equal(ax)
+    plt.savefig("main.png")
+    # plt.show()
 
-    plt.show()
+    pos_errors = ts.pos[:,:] - ref.pos(ts.times)[:, :].T
+
+    control_errors = np.linalg.norm(pos_errors, axis=1)
+    print("\n\n Control error: ", np.mean(control_errors))
