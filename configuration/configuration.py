@@ -65,7 +65,9 @@ class DroneConfiguration:
     mass: ConfigValue[float] = ConfigValue[float](default=1.0, randomize=False)
     # assumes all axes are same
     I: ConfigValue[float] = ConfigValue[float](default=1.0, randomize=False)
-
+    model_mismatch: ConfigValue[bool] = ConfigValue[bool](default=False, randomize=False)
+    assumed_mass: ConfigValue[float] = ConfigValue[float](default=1.0, randomize=False)
+    assumed_I: ConfigValue[float] = ConfigValue[float](default=1.0, randomize=False)
     sampler: Sampler = Sampler()
 
 @dataclass
@@ -124,6 +126,9 @@ class SimConfiguration:
     # Whether to run L1 adaptation in sim, so the d values are not ground truth but the results
     # of L1 adaptation. NOTE: Requires wind to be specified in AdaptationConfiguration, and first
     L1_simulation: ConfigValue[bool] = ConfigValue[bool](default=False, randomize=False)
+
+    # whether to include the assumed mass and ineratia in the observation at the end
+    include_env_info: ConfigValue[bool] = ConfigValue[bool](default=False, randomize=False)
 
     sampler: Sampler = Sampler()
 
