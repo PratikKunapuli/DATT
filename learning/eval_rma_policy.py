@@ -24,6 +24,7 @@ from DATT.learning.train_policy import TrajectoryRef
 
 from stable_baselines3.common.env_util import make_vec_env
 
+from custom_policies import *
 
 def parse_args():
     parser = ArgumentParser()
@@ -76,27 +77,50 @@ def remove_e_dim(output_obs: np.ndarray, e_dims: int, base_dims=10, include_extr
         obs = output_obs[:, :base_dims]
     return obs
 
+def remove_gt_info(output_obs: np.ndarray, encoder_input_dim: int = 10):
+    obs = output_obs[:, :-encoder_input_dim]
+    encoder_input_info = output_obs[:, -encoder_input_dim:]
+    return obs, encoder_input_info
+
+def add_latent(obs: np.ndarray, latent: np.ndarray):
+    return np.concatenate((obs, latent), axis=1)
+
 def rollout_adaptive_policy(rollout_len, adaptation_network, policy, evalenv, n_envs, time_horizon, base_dims, e_dims, device, vis, rate, progress=None):
     action_dims = 4
 
     history = torch.zeros((n_envs, base_dims + action_dims, time_horizon)).to(device)
-    fbff_obs = remove_e_dim(evalenv.reset(), e_dims, include_extra=True)
+    if isinstance(policy.policy, RMAPolicy) or isinstance(policy.policy, RPGPolicy):
+        fbff_obs, encoder_input = remove_gt_info(evalenv.reset())
+    else:
+        fbff_obs = remove_e_dim(evalenv.reset(), e_dims, include_extra=True)
     all_states = []
     des_traj = []
     for i in range(rollout_len):
         # shape (n_envs, e_dim)
         e_pred = adaptation_network(history)
 
-        input_obs = add_e_dim(fbff_obs, e_pred.detach().cpu().numpy(), base_dims)
+        if isinstance(policy.policy, RMAPolicy):
+            input_obs = add_latent(fbff_obs, e_pred.detach().cpu().numpy())
+        else:
+            input_obs = add_e_dim(fbff_obs, e_pred.detach().cpu().numpy(), base_dims)
 
-        actions, _states = policy.predict(input_obs, deterministic=True)
+        if isinstance(policy.policy, RMAPolicy):
+            actions, _states = policy.policy.predict(input_obs, deterministic=True, features_included=True)
+        else:
+            actions, _states = policy.predict(input_obs, deterministic=True)
 
+        actions = actions[np.newaxis, :]
         # this obs contains e, which should be removed
         obs, rewards, dones, info = evalenv.step(actions)
 
-        e_gt = obs[:, base_dims:(base_dims + e_dims)]
+        if isinstance(policy.policy, RMAPolicy):
+            fbff_obs, encoder_input = remove_gt_info(obs)
+            e_gt = policy.policy.encoder(torch.from_numpy(encoder_input).to(device)).float()
+        else:
+            e_gt = obs[:, base_dims:(base_dims + e_dims)]
+            fbff_obs = remove_e_dim(obs, e_dims, include_extra=True)
 
-        print(e_pred.detach().cpu().numpy(), 'gt: ', e_gt)
+        # print(e_pred.detach().cpu().numpy(), 'gt: ', e_gt)
 
         # just the pos, vel, orientation part of state should be used for prediction of e
         base_states = remove_e_dim(obs, e_dims)
@@ -116,7 +140,7 @@ def rollout_adaptive_policy(rollout_len, adaptation_network, policy, evalenv, n_
 
         des_traj.append(evalenv.get_attr('ref', 0)[0].pos(evalenv.get_attr('t', 0)[0]))
         
-        fbff_obs = remove_e_dim(obs, e_dims, include_extra=True)
+        
 
         if progress is not None:
             progress[0].update(task_id=progress[1], completed=i + 1)
@@ -189,12 +213,23 @@ def eval():
     else:
         raise ValueError(f'Invalid adaptation network name: {adapt_name}')
 
-    adaptation_network = AdaptationNetwork(input_dims=trainenv.base_dims + action_dims, e_dims=e_dims)
+    if isinstance(policy.policy, RMAPolicy):
+        adaptation_network = AdaptationNetwork(input_dims=trainenv.base_dims + action_dims, e_dims=5)
+    else:
+        adaptation_network = AdaptationNetwork(input_dims=trainenv.base_dims + action_dims, e_dims=e_dims)
     adaptation_network = adaptation_network.to(device)
     adaptation_network.load_state_dict(adaptation_network_state_dict)
 
     vis = Vis()
-    while True:
+    count = 0
+    control_errors = []
+    while count < 10:
+        evalenv = make_vec_env(task.env(), n_envs=1, env_kwargs={
+            'config': config,
+            'ref': ref,
+            'seed': count,
+            'fixed_seed': fixed_seed,
+        })
         all_states, des_traj = rollout_adaptive_policy(eval_steps, adaptation_network, policy, evalenv, 1, time_horizon, trainenv.base_dims, e_dims, device, vis, rate)
         if viz:
             plt.figure()
@@ -216,6 +251,12 @@ def eval():
             eulers = np.array([R.from_quat(rot).as_euler('ZYX')[::-1] for rot in all_states[:, 6:10]])
             subplot(range(eval_steps), eulers, yname="Euler (rad)", title="ZYX Euler Angles")
             plt.show()
+        control_error = np.linalg.norm(all_states[:, :3] - des_traj, axis=1)
+        print('Control error: ', np.mean(control_error))
+        control_errors.append(np.mean(control_error))
+        count += 1
+    
+    print("\n\n Control error: ", np.mean(control_errors), " std: ", np.std(control_errors))
 
 if __name__ == "__main__":
     eval()

@@ -20,6 +20,8 @@ from DATT.configuration.configuration import AllConfig
 
 from DATT.learning.adaptation_module import Adapation
 
+from custom_policies import *
+
 
 def parse_args():
     parser = ArgumentParser()
@@ -77,28 +79,33 @@ def eval():
 
     l1_sim = config.sim_config.L1_simulation
 
-    if task.is_trajectory():
-        if seed is None:
-            seed = np.random.randint(0, 100000)
-            fixed_seed = False
-        else:
-            fixed_seed = True
-        print(seed)
-        evalenv = task.env()(config=config, ref=ref, seed=seed, fixed_seed=fixed_seed)
-    else:
-        evalenv = task.env()(config=config)
+    # if task.is_trajectory():
+    #     if seed is None:
+    #         seed = np.random.randint(0, 100000)
+    #         fixed_seed = False
+    #     else:
+    #         fixed_seed = True
+    #     print(seed)
+    #     evalenv = task.env()(config=config, ref=ref, seed=seed, fixed_seed=fixed_seed)
+    # else:
+    #     evalenv = task.env()(config=config)
 
     policy = algo_class.load(SAVED_POLICY_DIR / f'{policy_name}.zip')
 
+    print(policy.policy)
+
     control_error_avg = 0
     adaptation_module = Adapation()
+    summary_control_errors = []
+    per_traj_control_errors = []
     count = 0
     if viz:
         vis = Vis() 
     try:
-        while True:
+        while count < 10:
             count += 1
             total_r = 0
+            evalenv = task.env()(config=config, ref=ref, seed=count, fixed_seed=False)
             obs = evalenv.reset()
             adaptation_module.reset()
             all_states = []
@@ -118,8 +125,14 @@ def eval():
                 pass
             for i in range(eval_steps):
                 action, _states = policy.predict(obs, deterministic=True)
-
                 act = action
+
+                # neeed for RMA model to work
+                # obs_tensor = torch.from_numpy(obs)
+                # obs_tensor = obs_tensor.reshape(1, -1).to(policy.device)
+                # action, _, _ = policy.policy(obs_tensor, deterministic=True)
+
+                # act = action.cpu().detach().numpy().flatten()
                 obs, rewards, dones, info = evalenv.step(act)
 
                 state = evalenv.getstate()
@@ -128,7 +141,7 @@ def eval():
                 all_wind.append(wind_vector.copy())
                 if l1_sim:
                     l1_terms.append(evalenv.adaptation_module.d_hat.copy())
-                all_actions.append(action)
+                all_actions.append(act)
                 all_rewards.append(rewards)
                 all_states.append(np.r_[state.pos, state.vel, obs[6:10]])
                 # all_pid_actions.append(pid_action[0])
@@ -176,22 +189,23 @@ def eval():
                 if des_traj.size > 0:
                     plt.plot(range(eval_steps), des_traj[:, 2])
                 plt.suptitle('PPO (sim) des vs. actual pos mass : {}'.format(evalenv.model.mass))
+                plt.savefig("rollout_" + str(count) + ".png")
                 # plt.suptitle('Positions')
 
-                plt.figure()
-                ax = plt.subplot(3, 1, 1)
-                plt.plot(range(eval_steps), all_wind[:, 0], label='x')
-                if l1_sim:
-                    plt.plot(range(eval_steps), l1_terms[:, 0], label='L1 x')
-                plt.subplot(3, 1, 2, sharex=ax)
-                plt.plot(range(eval_steps), all_wind[:, 1], label='y')
-                if l1_sim:
-                    plt.plot(range(eval_steps), l1_terms[:, 1], label='L1 y')
-                plt.subplot(3, 1, 3, sharex=ax)
-                plt.plot(range(eval_steps), all_wind[:, 2], label='z')
-                if l1_sim:
-                    plt.plot(range(eval_steps), l1_terms[:, 2], label='L1 z')
-                plt.suptitle('L1 vs. Wind')
+                # plt.figure()
+                # ax = plt.subplot(3, 1, 1)
+                # plt.plot(range(eval_steps), all_wind[:, 0], label='x')
+                # if l1_sim:
+                #     plt.plot(range(eval_steps), l1_terms[:, 0], label='L1 x')
+                # plt.subplot(3, 1, 2, sharex=ax)
+                # plt.plot(range(eval_steps), all_wind[:, 1], label='y')
+                # if l1_sim:
+                #     plt.plot(range(eval_steps), l1_terms[:, 1], label='L1 y')
+                # plt.subplot(3, 1, 3, sharex=ax)
+                # plt.plot(range(eval_steps), all_wind[:, 2], label='z')
+                # if l1_sim:
+                #     plt.plot(range(eval_steps), l1_terms[:, 2], label='L1 z')
+                # plt.suptitle('L1 vs. Wind')
 
 
                 try:
@@ -255,12 +269,20 @@ def eval():
                 # subplot(range(eval_steps), eulers, yname="Euler (rad)", title="ZYX Euler Angles")
                 # subplot(range(eval_steps), all_rewards, title="Reward per step")
                 # plt.savefig("rwik_{}_pos.png".format(str(count).zfill(3)))
-                plt.show()
+                #plt.show()
             print(total_r)
             control_error_avg += np.mean(control_errors)
+            pos_error = np.linalg.norm(all_states[:, :3] - des_traj, axis=1)
             print('control error', np.mean(control_errors))
+            summary_control_errors.append(np.mean(control_errors))
+            per_traj_control_errors.append(np.mean(pos_error))
     except KeyboardInterrupt:
-        print('Control Error: ', control_error_avg / count)
+        print("\n\nControl Error: ", np.mean(summary_control_errors), " std: ", np.std(summary_control_errors))
+
+    print("\n\nControl Error: ", np.mean(summary_control_errors), " std: ", np.std(summary_control_errors))
+
+    print("Per traj: ", per_traj_control_errors)
+    print("Per traj avg: ", np.mean(per_traj_control_errors), " std: ", np.std(per_traj_control_errors))
 
 if __name__ == "__main__":
     eval()
