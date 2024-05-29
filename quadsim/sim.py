@@ -12,9 +12,15 @@ from DATT.quadsim.visualizer import Vis
 from DATT.learning.utils.heap import heap
 
 class QuadSim:
-  def __init__(self, model, force_limit=200, torque_limit=100, angvel_limit=40, vis=False):
+  # Extra input added:
+  # assumed_mass: If not None, use this mass instead of the model's mass. This represents a model-mismatch where the 
+  #               assumed mass of the system is different from the true mass that the dynamics would be modeled with.
+  # ctbr: If true, assumed that the input is using a CTBR controller where the input modality is thrust and ang vel.
+  #         if false, assumed that SRT is the input modality meaning that the assumed model inputs need to be allocated to
+  #         determine the true force and torque before applying them to the rigid body.
+  def __init__(self, model, force_limit=200, torque_limit=100, angvel_limit=40, vis=False, assumed_mass=None, ctbr=True):
     self.gvec = np.array((0, 0, -model.g))
-    self.mass = model.mass
+    self.mass = model.mass if assumed_mass is None else assumed_mass # MODIFIED: Change the CTBR model to the assumed mass
     self.rb = RigidBody(mass=model.mass, inertia=model.I)
     self.model = model
 
@@ -147,7 +153,7 @@ class QuadSim:
     return state
 
   def step(self, t, dt, controller, **kwargs):
-    step_f = self._step_angvel if controller.sim_angvel else self._step_torque
+    step_f = self._step_angvel if (controller.sim_angvel or self.ctbr) else self._step_torque
     return step_f(t, dt, controller, **kwargs)
 
   def _step_torque(self, t, dt, controller, dists=None, ts=None):
