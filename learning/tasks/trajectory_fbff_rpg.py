@@ -30,30 +30,37 @@ class TrajectoryEnv(BaseQuadsimEnv):
       self.ref = ref.ref(config.ref_config, seed=self.seed, env_diff_seed=config.training_config.env_diff_seed, fixed_seed=fixed_seed)
     self.dt = 0.02
 
+    state_dim = 13  # Assuming state includes position (3), velocity (3), orientation (4), angular velocity (3)
+    self.state_history = np.zeros((10, state_dim))
+
     super().__init__(config=config, **kwargs)
 
     #self.ref = CircleRef(rad=1, altitude=0.0)
     self.action_space = spaces.Box(low=np.array([-9.8, -20, -20, -2]), high=np.array([30, 20, 20, 2]))
 
+    # MODIFIED:
+    # This will normally be run with the fb_term and include_assumed_params true. 
+
     if self.fb_term:
       if self.include_assumed_params:
-        self.all_mins = np.r_[self.all_mins, -50 * np.ones(3 * (self.time_horizon + 1) + 10)]
-        self.all_maxes = np.r_[self.all_maxes, 50*np.ones(3 * (self.time_horizon + 1) + 10)]
+        self.all_mins = np.r_[self.all_mins, -50 * np.ones(3 * (self.time_horizon + 1) + 10*state_dim + 10)]
+        self.all_maxes = np.r_[self.all_maxes, 50*np.ones(3 * (self.time_horizon + 1) + 10*state_dim + 10)]
       else:
-        self.all_mins = np.r_[self.all_mins, -50 * np.ones(3 * (self.time_horizon + 1))]
-        self.all_maxes = np.r_[self.all_maxes, 50*np.ones(3 * (self.time_horizon + 1))]
+        self.all_mins = np.r_[self.all_mins, -50 * np.ones(3 * (self.time_horizon + 1) + 10*state_dim)]
+        self.all_maxes = np.r_[self.all_maxes, 50*np.ones(3 * (self.time_horizon + 1) + 10*state_dim)]
     else:
-      self.all_mins = np.r_[self.all_mins, -50 * np.ones(3 * (self.time_horizon))]
-      self.all_maxes = np.r_[self.all_maxes, 50*np.ones(3 * (self.time_horizon))]
+      self.all_mins = np.r_[self.all_mins, -50 * np.ones(3 * (self.time_horizon) + 10*state_dim)]
+      self.all_maxes = np.r_[self.all_maxes, 50*np.ones(3 * (self.time_horizon) + 10*state_dim)]
 
     if self.include_assumed_params:
-      self.observation_shape = (self.observation_shape[0] + 10 + 10,)
+      self.observation_shape = (self.observation_shape[0] + 10 + 10*state_dim + 10,)
     else:
-      self.observation_shape = (self.observation_shape[0] + 10,) 
+      self.observation_shape = (self.observation_shape[0] + 10*state_dim+10,) 
     self.observation_space = spaces.Box(low=self.all_mins, high=self.all_maxes)
     
   def reset(self, state=None):
     self.reset_count += 1      
+    self.state_history = np.zeros_like(self.state_history)
 
     if (self.reset_freq > 0 and self.reset_count % self.reset_freq == 0) or (self.reset_count > self.reset_thresh):
       try:
@@ -65,20 +72,27 @@ class TrajectoryEnv(BaseQuadsimEnv):
   def obs(self, state):
     obs_ = super().obs(state)
     rot = R.from_quat(obs_[6:10])
+
+    current_state = np.hstack([state.pos, state.vel, state.rot.as_quat(), state.ang])
+    self.state_history = np.roll(self.state_history, -1, axis=0)
+    self.state_history[-1] = current_state
+
+    history_flat = self.state_history.flatten()
+
     if self.body_frame:
       fb = obs_[0:3] - rot.inv().apply(self.ref.pos(self.t))
       if self.fb_term:
-        obs_ = np.hstack([obs_, fb] + [obs_[0:3] - rot.inv().apply(self.ref.pos(self.t + 3 * i * self.dt)) for i in range(self.time_horizon)])
+        obs_ = np.hstack([obs_, fb, history_flat] + [obs_[0:3] - rot.inv().apply(self.ref.pos(self.t + 3 * i * self.dt)) for i in range(self.time_horizon)])
       else:
         velquat = obs_[3:]
-        obs_ = np.hstack([fb, velquat] + [obs_[0:3] - rot.inv().apply(self.ref.pos(self.t + 3 * i * self.dt)) for i in range(self.time_horizon)])
+        obs_ = np.hstack([fb, velquat, history_flat] + [obs_[0:3] - rot.inv().apply(self.ref.pos(self.t + 3 * i * self.dt)) for i in range(self.time_horizon)])
     else:
       fb = obs_[0:3] - self.ref.pos(self.t)
       if self.fb_term:
-        obs_ = np.hstack([obs_, fb] + [self.ref.pos(self.t + 3 * i * self.dt) for i in range(self.time_horizon)])
+        obs_ = np.hstack([obs_, fb, history_flat] + [self.ref.pos(self.t + 3 * i * self.dt) for i in range(self.time_horizon)])
       else:
         velquat = obs_[3:]
-        obs_ = np.hstack([fb, velquat] + [self.ref.pos(self.t + 3 * i * self.dt) for i in range(self.time_horizon)])
+        obs_ = np.hstack([fb, velquat, history_flat] + [self.ref.pos(self.t + 3 * i * self.dt) for i in range(self.time_horizon)])
     
     if self.include_assumed_params: # MODIFIED to allow RMA Phase 1 Policies to get the true env. parameters
       obs_ = np.hstack([obs_, self.get_env_params()])
@@ -86,6 +100,20 @@ class TrajectoryEnv(BaseQuadsimEnv):
     return obs_
 
   def reward(self, state, action):
+    # pos_scalar = 0.1
+    # rot_scalar = 0.02
+    # vel_scalar = 0.01
+    # act_scalar = 0.001
+
+    # yaw = state.rot.as_euler('ZYX')[0]
+    # yawcost = rot_scalar * np.linalg.norm(yaw-self.ref.yaw(self.t))**2
+    # poscost = pos_scalar * np.linalg.norm(state.pos - self.ref.pos(self.t))**2
+    # velcost = vel_scalar * np.linalg.norm(state.vel)**2
+
+    # actcost = act_scalar * np.linalg.norm(action)**2
+
+    # cost = yawcost + poscost + velcost + actcost
+
     yaw = state.rot.as_euler('ZYX')[0]
     yawcost = 0.5 * min(abs(self.ref.yaw(self.t) - yaw), abs(self.ref.yaw(self.t) - yaw))
     poscost = np.linalg.norm(state.pos - self.ref.pos(self.t))#min(np.linalg.norm(state.pos), 1.0)

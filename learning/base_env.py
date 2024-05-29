@@ -145,7 +145,22 @@ class BaseQuadsimEnv(Env):
             g=drone_config.sampler.sample_param(sim_config.g)
         )
         self.g = drone_config.sampler.sample_param(sim_config.g)
-        self.quadsim = QuadSim(self.model, vis=False)
+
+
+        # MODIFIED:
+        # Added functionality to change the assumed mass of the simulator by adding in the param in drone_config
+        # This is done by checking if the model_mismatch parameter is sampled to be True (not randomized)
+        # If it is, then the assumed mass is sampled from the assumed_mass parameter (not randomized) 
+        # both model_mismatch must be set to true and the assumed mass is 1.0
+        # or if model_mismatch is false, then the true randomized mass is the assumed mass. 
+        if drone_config.sampler.sample_param(drone_config.model_mismatch):
+            self.assumed_mass = drone_config.sampler.sample_param(drone_config.assumed_mass)
+            self.assumed_I = np.eye(3)*drone_config.sampler.sample_param(drone_config.assumed_I)
+            self.quadsim = QuadSim(self.model, vis=False, assumed_mass = drone_config.sampler.sample_param(drone_config.assumed_mass))
+        else:
+            self.assumed_mass = self.model.mass
+            self.assumed_I = self.model.I
+            self.quadsim = QuadSim(self.model, vis=False)
 
         self.t = 0.0 
 
