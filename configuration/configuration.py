@@ -68,6 +68,13 @@ class DroneConfiguration:
     model_mismatch: ConfigValue[bool] = ConfigValue[bool](default=False, randomize=False)
     assumed_mass: ConfigValue[float] = ConfigValue[float](default=1.0, randomize=False)
     assumed_I: ConfigValue[float] = ConfigValue[float](default=1.0, randomize=False)
+
+    # Parameters for SRT Quadrotor Model
+    motor_thrust_coeff: ConfigValue[float] = ConfigValue[float](default=39.8/4, randomize=False)
+    motor_torque_scale: ConfigValue[float] = ConfigValue[float](default=0.005, randomize=False)
+    motor_arm_length: ConfigValue[float] = ConfigValue[float](default=0.1, randomize=False)
+    motor_spread_angle: ConfigValue[float] = ConfigValue[float](default=np.pi/2, randomize=False)
+
     sampler: Sampler = Sampler()
 
 @dataclass
@@ -127,8 +134,10 @@ class SimConfiguration:
     # of L1 adaptation. NOTE: Requires wind to be specified in AdaptationConfiguration, and first
     L1_simulation: bool = False
 
-    # whether to include the assumed mass and ineratia in the observation at the end
+    # whether to include the assumed mass and ineratia in the observation at the end (ctbr)
+    # or all parameters of quad simulated (srt)
     include_env_info: ConfigValue[bool] = ConfigValue[bool](default=False, randomize=False)
+    ctbr: bool = True
 
     sampler: Sampler = Sampler()
 

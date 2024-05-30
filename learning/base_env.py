@@ -8,7 +8,7 @@ from scipy.spatial.transform import Rotation as R
 from gym import Env, spaces
 
 from DATT.quadsim.sim import QuadSim
-from DATT.quadsim.models import IdentityModel, RBModel
+from DATT.quadsim.models import IdentityModel, RBModel, QuadModel
 from DATT.quadsim.rigid_body import State_struct
 from DATT.quadsim.dist import WindField, ConstantForce
 from DATT.configuration.configuration import AllConfig
@@ -53,7 +53,7 @@ class BaseQuadsimEnv(Env):
             save_data: bool = False, 
             data_file: Optional[Path] = None, 
             save_interval: int = 100000, 
-            save_verbose: bool = False
+            save_verbose: bool = False,
         ):
         """
         config: config object
@@ -73,6 +73,9 @@ class BaseQuadsimEnv(Env):
         self.body_frame = self.config.training_config.body_frame
         self.second_order_delay = self.config.sim_config.second_order_delay
         self.L1_simulation = self.config.sim_config.L1_simulation
+
+        self.ctbr = self.config.sim_config.ctbr
+
         
         self.data_store: List[ObsData] = [] 
 
@@ -137,30 +140,67 @@ class BaseQuadsimEnv(Env):
         if self.save_data:
             self.save_info(new_episode=True)
 
-        drone_config = self.config.drone_config
-        sim_config = self.config.sim_config
-        self.model = RBModel(
-            mass=drone_config.sampler.sample_param(drone_config.mass), 
-            I=np.eye(3)*drone_config.sampler.sample_param(drone_config.I), 
-            g=drone_config.sampler.sample_param(sim_config.g)
-        )
-        self.g = drone_config.sampler.sample_param(sim_config.g)
+        if self.ctbr:
+            drone_config = self.config.drone_config
+            sim_config = self.config.sim_config
+            self.model = RBModel(
+                mass=drone_config.sampler.sample_param(drone_config.mass), 
+                I=np.eye(3)*drone_config.sampler.sample_param(drone_config.I), 
+                g=drone_config.sampler.sample_param(sim_config.g)
+            )
+            self.g = drone_config.sampler.sample_param(sim_config.g)
+
+            # MODIFIED:
+            # Added functionality to change the assumed mass of the simulator by adding in the param in drone_config
+            # This is done by checking if the model_mismatch parameter is sampled to be True (not randomized)
+            # If it is, then the assumed mass is sampled from the assumed_mass parameter (not randomized) 
+            # both model_mismatch must be set to true and the assumed mass is 1.0
+            # or if model_mismatch is false, then the true randomized mass is the assumed mass. 
+            if drone_config.sampler.sample_param(drone_config.model_mismatch):
+                self.assumed_mass = drone_config.sampler.sample_param(drone_config.assumed_mass)
+                self.assumed_I = np.eye(3)*drone_config.sampler.sample_param(drone_config.assumed_I)
+                self.quadsim = QuadSim(self.model, vis=False, assumed_mass = drone_config.sampler.sample_param(drone_config.assumed_mass))
+            else:
+                self.assumed_mass = self.model.mass
+                self.assumed_I = self.model.I
+                self.quadsim = QuadSim(self.model, vis=False)
+        else: # SRT Mode
+            # Need to crete a qudrotor model instead of RB model and randomize all the appropriate parameters
+            drone_config = self.config.drone_config
+            sim_config = self.config.sim_config
+
+            # These params should be in the drone config, and we want them to approximately match what would be used in the RB model
+            # params we need to randomize:
+            # mass, motor_thrust_coeffs, motor_torque_scale, inertia, motor_arm_length, motor_spread_angle, motor_inertia=0.0, center_of_mass=np.zeros(3),
+            self.mass = drone_config.sampler.sample_param(drone_config.mass)
+            self.I = np.eye(3)*drone_config.sampler.sample_param(drone_config.I)
+
+            # Motor thrust coefficients are assumed to be force = a0 + a1*rpm, where a1 is randomized and a0 is -9.8/4
+            a0 = -9.8/4
+            a1 = drone_config.sampler.sample_param(drone_config.motor_thrust_coeff)
+            self.motor_thrust_coeffs = [a1, a0]
+            self.motor_torque_scale = drone_config.sampler.sample_param(drone_config.motor_torque_scale)
+            self.motor_arm_length = drone_config.sampler.sample_param(drone_config.motor_arm_length)
+            self.motor_spread_angle = drone_config.sampler.sample_param(drone_config.motor_spread_angle)
+            self.motor_inertia = 0.0
+            self.center_of_mass = np.zeros(3)
+            self.g = sim_config.sampler.sample_param(sim_config.g)
 
 
-        # MODIFIED:
-        # Added functionality to change the assumed mass of the simulator by adding in the param in drone_config
-        # This is done by checking if the model_mismatch parameter is sampled to be True (not randomized)
-        # If it is, then the assumed mass is sampled from the assumed_mass parameter (not randomized) 
-        # both model_mismatch must be set to true and the assumed mass is 1.0
-        # or if model_mismatch is false, then the true randomized mass is the assumed mass. 
-        if drone_config.sampler.sample_param(drone_config.model_mismatch):
-            self.assumed_mass = drone_config.sampler.sample_param(drone_config.assumed_mass)
-            self.assumed_I = np.eye(3)*drone_config.sampler.sample_param(drone_config.assumed_I)
-            self.quadsim = QuadSim(self.model, vis=False, assumed_mass = drone_config.sampler.sample_param(drone_config.assumed_mass))
-        else:
-            self.assumed_mass = self.model.mass
-            self.assumed_I = self.model.I
-            self.quadsim = QuadSim(self.model, vis=False)
+            self.model = QuadModel({
+                'mass': self.mass,
+                'inertia': self.I,
+                'motor_thrust_coeffs': self.motor_thrust_coeffs,
+                'motor_torque_scale': self.motor_torque_scale,
+                'center_of_mass': self.center_of_mass,
+                'motor_inertia': self.motor_inertia,
+                'motor_arm_length': self.motor_arm_length,
+                'motor_spread_angle': self.motor_spread_angle,
+                'motor_tc': 30,
+                'g': self.g
+            })
+
+            self.quadsim = QuadSim(self.model, vis=False, assumed_mass = self.mass, ctbr=False)
 
         self.t = 0.0 
 
@@ -238,27 +278,35 @@ class BaseQuadsimEnv(Env):
 
     @save
     def step(self, action):
-        u, angvel = action[0], action[1:4]
-        u += self.g
 
-        # Time-dependent wind (brownian motion)
-        wind_config = self.config.wind_config
-        if wind_config.is_wind and wind_config.random_walk:
-            self.wind_vector += np.random.normal(loc=0, scale=wind_config.random_walk * self.dt, size=(3,))
-            self.dists = [
-                ConstantForce(
-                    scale=self.wind_vector
+        if self.ctbr:
+            u, angvel = action[0], action[1:4]
+            u += self.g
+
+            # Time-dependent wind (brownian motion)
+            wind_config = self.config.wind_config
+            if wind_config.is_wind and wind_config.random_walk:
+                self.wind_vector += np.random.normal(loc=0, scale=wind_config.random_walk * self.dt, size=(3,))
+                self.dists = [
+                    ConstantForce(
+                        scale=self.wind_vector
+                    )
+                ]
+
+            state = self.quadsim.step_angvel_raw(self.dt, u, angvel,
+                    dists=self.dists, linear_var=self.linear_var, angular_var=self.angular_var,
+                    latency=self.latency,
+                    k=self.k,
+                    second_order=self.second_order_delay,
+                    kw=self.kw if self.second_order_delay else 1.0,
+                    kt=self.kt if self.second_order_delay else 1.0
                 )
-            ]
+        else: # SRT Mode
+            # Actions are in rpms, need to convert to force before stepping
+            force, torque = self.model.forcetorque_from_rpm(action)
+            state = self.quadsim.step_torque_raw(self.dt, force, torque)
 
-        state = self.quadsim.step_angvel_raw(self.dt, u, angvel,
-                dists=self.dists, linear_var=self.linear_var, angular_var=self.angular_var,
-                latency=self.latency,
-                k=self.k,
-                second_order=self.second_order_delay,
-                kw=self.kw if self.second_order_delay else 1.0,
-                kt=self.kt if self.second_order_delay else 1.0
-            )
+            
         self.t += self.dt
 
         failed = False

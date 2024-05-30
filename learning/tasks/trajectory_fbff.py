@@ -23,6 +23,7 @@ class TrajectoryEnv(BaseQuadsimEnv):
     self.reset_count = 0
     self.reset_freq = config.training_config.reset_freq
     self.reset_thresh = config.training_config.reset_thresh
+    self.ctbr = config.sim_config.ctbr # New: added flag to run SRT modes
 
     if ref is None:
         self.ref = LineRef(D=1.0, altitude=0.0, period=1)
@@ -33,7 +34,10 @@ class TrajectoryEnv(BaseQuadsimEnv):
     super().__init__(config=config, **kwargs)
 
     #self.ref = CircleRef(rad=1, altitude=0.0)
-    self.action_space = spaces.Box(low=np.array([-9.8, -20, -20, -2]), high=np.array([30, 20, 20, 2]))
+    if self.ctbr:
+      self.action_space = spaces.Box(low=np.array([-9.8, -20, -20, -2]), high=np.array([30, 20, 20, 2]))
+    else:
+      self.action_space = spaces.Box(low=np.array([0, 0, 0, 0]), high=np.array([100, 100, 100, 100]))
 
     if self.fb_term:
       if self.include_assumed_params:
@@ -47,7 +51,8 @@ class TrajectoryEnv(BaseQuadsimEnv):
       self.all_maxes = np.r_[self.all_maxes, 50*np.ones(3 * (self.time_horizon))]
 
     if self.include_assumed_params:
-      self.observation_shape = (self.observation_shape[0] + 10 + 10,)
+      extra_params = 10 if self.ctbr else 15
+      self.observation_shape = (self.observation_shape[0] + 10 + extra_params,)
     else:
       self.observation_shape = (self.observation_shape[0] + 10,) 
     self.observation_space = spaces.Box(low=self.all_mins, high=self.all_maxes)
@@ -81,7 +86,11 @@ class TrajectoryEnv(BaseQuadsimEnv):
         obs_ = np.hstack([fb, velquat] + [self.ref.pos(self.t + 3 * i * self.dt) for i in range(self.time_horizon)])
     
     if self.include_assumed_params: # MODIFIED to allow RMA Phase 1 Policies to get the true env. parameters
-      obs_ = np.hstack([obs_, self.get_env_params()])
+      if self.ctbr:
+        obs_ = np.hstack([obs_, self.get_env_params_ctbr()])
+      else:
+        obs_ = np.hstack([obs_, self.get_env_params_srt()])
+
 
     return obs_
 
@@ -97,5 +106,8 @@ class TrajectoryEnv(BaseQuadsimEnv):
 
     return -cost
   
-  def get_env_params(self):
+  def get_env_params_ctbr(self):
     return np.hstack([self.assumed_mass, self.assumed_I.flatten()])
+  
+  def get_env_params_srt(self):
+    return np.hstack([self.mass, self.I.flatten(), self.motor_thrust_coeffs, self.motor_torque_scale, self.motor_arm_length, self.motor_spread_angle])

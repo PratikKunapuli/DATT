@@ -30,7 +30,7 @@ class QuadModel(RBModel):
 
   def update(self):
     quadrotor = Quadrotor(**self.params)
-    super().__init__(quadrotor.mass, quadrotor.I, quadrotor.g)
+    super().__init__(quadrotor.mass, quadrotor.I, self.params['g'])
 
     self.mixer_inv = quadrotor.mixer_inv
     self.mixer = quadrotor.mixer

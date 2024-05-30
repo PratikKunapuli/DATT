@@ -24,6 +24,8 @@ class QuadSim:
     self.rb = RigidBody(mass=model.mass, inertia=model.I)
     self.model = model
 
+    self.ctbr = ctbr
+
     self.force_limit = force_limit # Newtons (N)
     # L_2 limit on vector
     self.torque_limit = torque_limit # Nm
@@ -153,8 +155,35 @@ class QuadSim:
     return state
 
   def step(self, t, dt, controller, **kwargs):
-    step_f = self._step_angvel if (controller.sim_angvel or self.ctbr) else self._step_torque
+    if not self.ctbr:
+      step_f = self._step_torque
+    elif controller.sim_angvel or self.ctbr:
+      step_f = self._step_angvel
     return step_f(t, dt, controller, **kwargs)
+  
+  def step_torque_raw(self, dt, force, torque, dists=None):
+    if dists is None:
+      dists = []
+
+    if force < 0 or force > self.force_limit:
+      #print("Clipping force!", force)
+      force = np.clip(force, 0, self.force_limit)
+
+    torque_norm = np.linalg.norm(torque)
+    if torque_norm > self.torque_limit:
+      print("Clipping torque!", torque)
+      torque *= self.torque_limit / torque_norm
+
+    state = self.rb.state()
+    force_world = force * state.rot.apply(e3) + self.mass * self.gvec
+
+    for dist in dists:
+      d = dist.get(state, (force, torque))
+      force_world += d[:3]
+      torque += d[3:]
+
+    self.rb.step(dt, force=force_world, torque=torque)
+    return self.rb.state()
 
   def _step_torque(self, t, dt, controller, dists=None, ts=None):
     if dists is None:
